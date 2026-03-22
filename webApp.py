@@ -7,6 +7,8 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import json
+import requests
 
 # KONFIGURACE
 st.set_page_config(page_title="Analýza: COVID-19 vs Chřipka", layout="wide")
@@ -30,11 +32,12 @@ except Exception as e:
 
 # MENU
 st.sidebar.title("Menu")
-menu = st.sidebar.radio("Přejí na:", [
+menu = st.sidebar.radio("**Přejí na:**", [
     "Úvodní stránka", 
     "Covid-19", 
     "Chřipka", 
-    "Interaktivní srovnávač"
+    "Interaktivní srovnávač",
+    "Covid-19 (LIVE)"
 ])
 
 # 1. ÚVODNÍ STRÁNKA 
@@ -54,7 +57,7 @@ if menu == "Úvodní stránka":
 
     with col2:
         st.subheader("Celkové hospitalizace")
-        c_hosp = covid_cr['Počet nově hospitalizovaných celkem'].sum()
+        c_hosp = covid_cr['Počet hospitalizovaných'].sum()
         f_hosp = flu_kraje['pocet_hosp'].sum()
         st.metric("COVID-19", f"{c_hosp:,.0f} hospitalizací")
         st.metric("Chřipka", f"{f_hosp:,.0f} hospitalizací")
@@ -116,7 +119,7 @@ elif menu == "Covid-19":
     fig_trends = go.Figure()
     
     fig_trends.add_trace(go.Scatter(
-        x=covid_cr['datum_dt'], y=covid_cr['Počet nově hospitalizovaných celkem'],
+        x=covid_cr['datum_dt'], y=covid_cr['Počet hospitalizovaných'],
         name='Hospitalizace', fill='tozeroy', line_color="#FFBF00"
     ))
     
@@ -132,6 +135,62 @@ elif menu == "Covid-19":
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
     st.plotly_chart(fig_trends, use_container_width=True)
+
+# --- 2. REGIONÁLNÍ MAPA (OPRAVENÁ VERZE) ---
+    # --- 2. REGIONÁLNÍ MAPA (MAPBOX VERZE - ODOLNÁ PROTI CHYBÁM) ---
+    st.markdown("---")
+    st.subheader("Mapa krajů")
+    
+    try:
+        with open("DataApp/kraje.json", encoding="utf-8") as f:
+            geojson_kraje = json.load(f)
+        
+        # Oprava ID (Zkrácení z CZ0100000000 na CZ010 pro tvá data)
+        for feature in geojson_kraje['features']:
+            feature['id'] = feature['id'][:5]
+
+        c1, c2 = st.columns([1, 3])
+        with c1:
+            map_metrika = st.radio(
+                "**Co chcete zobrazit:**",
+                ["Počet hospitalizovaných", "Počet zemřelých", "Počet nakažených", "Počet dávek očkování"],
+                key="map_radio"
+            )
+        
+        # Příprava dat (výběr tabulky a barev)
+        if map_metrika == "Počet dávek očkování":
+            df_map = covid_ock_kraje.groupby(['kraj_nuts_kod', 'kraj_nazev'])['celkem_davek'].sum().reset_index()
+            lokace, hodnota, popisek, barva = "kraj_nuts_kod", "celkem_davek", "kraj_nazev", "Reds"
+        else:
+            map_mapping = {
+                "Počet hospitalizovaných": "Počet hospitalizovaných celkem v daném dni",
+                "Počet zemřelých": "Počet zemřelých",
+                "Počet nakažených": "Celkový počet nakažených"
+            }
+            tech_nazev = map_mapping[map_metrika]
+            df_map = covid_hosp_kraje.groupby(['Kraj_ID', 'Kraj_Název'])[tech_nazev].sum().reset_index()
+            lokace, hodnota, popisek, barva = "Kraj_ID", tech_nazev, "Kraj_Název", "Reds"
+
+        with c2:
+            fig_map = px.choropleth_mapbox(
+                df_map,
+                geojson=geojson_kraje,
+                locations=lokace,
+                featureidkey="id",
+                color=hodnota,
+                color_continuous_scale=barva,
+                mapbox_style="white-bg",
+                zoom=6.3, 
+                center={"lat": 49.8175, "lon": 15.4730}, 
+                hover_name=popisek,
+                labels={hodnota: 'Celkem'}
+            )
+
+            fig_map.update_layout(margin={"r":0,"t":0,"l":0,"b":0}, height=500)
+            st.plotly_chart(fig_map, use_container_width=True)
+            
+    except Exception as e:
+        st.error(f"Chyba při vykreslování Mapboxu: {e}")
 
     st.markdown("---")
     st.subheader("Věková struktura úmrtí")
@@ -180,7 +239,7 @@ elif menu == "Covid-19":
     fig_tests = go.Figure()
     fig_tests.add_trace(go.Bar(
         x=covid_cr['datum_dt'], y=covid_cr['Počet PCR testů'],
-        name='Počet PCR testů', marker_color="#48FF00"
+        name='Počet PCR testů', marker_color="#30A900"
     ))
     fig_tests.add_trace(go.Bar(
         x=covid_cr['datum_dt'], y=covid_cr['Počet antigenních testů'],
@@ -200,7 +259,7 @@ elif menu == "Covid-19":
     fig_cases = go.Figure()
     fig_cases.add_trace(go.Scatter(
         x=covid_cr['datum_dt'], y=covid_cr['Celkový počet nakažených'],
-        name='Nakažení', fill='tozeroy', line_color="#16aaff"
+        name='Nakažení', line_color="#16aaff"
     ))
     fig_cases.update_layout(
         title="Denní přírůstky nakažených",
@@ -224,39 +283,29 @@ elif menu == "Covid-19":
     populace_cr = 10500000
     df_vax_daily['proockovanost_perc'] = (df_vax_daily['druhych_davek'].cumsum() / populace_cr) * 100
 
-    df_vax_daily['denni_davky_avg'] = (df_vax_daily['prvnich_davek'] + df_vax_daily['druhych_davek']).rolling(window=7).mean()
-
     fig_vax_cool = go.Figure()
 
     fig_vax_cool.add_trace(go.Bar(
         x=df_vax_daily['datum_dt'],
         y=df_vax_daily['prvnich_davek'] + df_vax_daily['druhych_davek'],
-        name='Denně vyočkované dávky',
-        marker_color="#0084ff",
-        opacity=0.6
-    ))
-
-    fig_vax_cool.add_trace(go.Scatter(
-        x=df_vax_daily['datum_dt'],
-        y=df_vax_daily['denni_davky_avg'],
-        name='7denní průměr (trend)',
-        line=dict(color="#8edfff", width=2)
+        name='Počet vakcín',
+        marker_color="#0084ff"
     ))
 
     fig_vax_cool.add_trace(go.Scatter(
         x=df_vax_daily['datum_dt'],
         y=df_vax_daily['proockovanost_perc'],
-        name='Celková proočkovanost (%)',
-        line=dict(color="#00ff0d", width=3, dash='dot'),
+        name='Celková proočkovanost',
+        line=dict(color="#00aa09", width=3, dash='dot'),
         yaxis='y2'
     ))
 
     fig_vax_cool.update_layout(
         title='Rychlost vakcinace a celkový pokrok v čase',
         xaxis_title='Datum',
-        yaxis=dict(title='Počet vyočkovaných dávek za den'),
+        yaxis=dict(title='Počet vyočkovaných dávek'),
         yaxis2=dict(
-            title='Celková proočkovanost (%)',
+            title='Celková proočkovanost',
             overlaying='y',
             side='right',
             dtick=10,
@@ -353,26 +402,35 @@ elif menu == "Chřipka":
 
     flu_vax_season = flu_ock_kraje.groupby('sezona').agg({
         'pocet_vakcinovanych': 'sum',
-        'proockovanost_procenta': 'mean' # Průměr z krajů
+        'proockovanost_procenta': 'mean'
     }).reset_index()
 
     fig_flu_vax = go.Figure()
 
     fig_flu_vax.add_trace(go.Bar(
-        x=flu_vax_season['sezona'], y=flu_vax_season['pocet_vakcinovanych'],
-        name='Počet vakcinovaných', marker_color="#8edfff", opacity=0.6
+        x=flu_vax_season['sezona'], 
+        y=flu_vax_season['pocet_vakcinovanych'],
+        name='Počet vakcín',
+        marker_color="#0084ff"
     ))
 
     fig_flu_vax.add_trace(go.Scatter(
-        x=flu_vax_season['sezona'], y=flu_vax_season['proockovanost_procenta'],
-        name='Proočkovanost (%)', line=dict(color="#00ff0d", width=3),
+        x=flu_vax_season['sezona'], 
+        y=flu_vax_season['proockovanost_procenta'],
+        name='Celková pročkovanost', 
+        line=dict(color="#00aa09", width=3, dash='dot'),
         yaxis='y2'
     ))
 
     fig_flu_vax.update_layout(
         title="Rychlost vakcinace a celkový pokrok v čase",
-        yaxis=dict(title="Počet osob"),
-        yaxis2=dict(title="Proočkovanost (%)", overlaying='y', side='right', range=[0, 10]), # Chřipka má nízká %
+        xaxis_title='Datum',
+        yaxis=dict(title="Počet vyočkovaných dávek"),
+        yaxis2=dict(
+            title="Celková proočkovanost", 
+            overlaying='y', 
+            side='right', 
+            range=[0, 10]),
         template="plotly_white",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
@@ -401,11 +459,11 @@ elif menu == "Interaktivní srovnávač":
 
     flu_mapping = {
         'Počet hospitalizovaných': 'pocet_hosp',
-        'Počet úmrtí': 'umrti',
+        'Počet zemřelých': 'umrti',
         'Počet chráněných osob': 'pocet_vakcinovanych'
     }
 
-    covid_metrics = ['Počet zemřelých', 'Počet nově hospitalizovaných celkem', 'Počet PCR testů', 'Počet antigenních testů', 'Celkový počet nakažených', 'Počet chráněných osob']
+    covid_metrics = ['Počet zemřelých', 'Počet hospitalizovaných', 'Počet PCR testů', 'Počet antigenních testů', 'Celkový počet nakažených', 'Počet chráněných osob']
     flu_metrics = list(flu_mapping.keys())
 
     covid_years = set(covid_cr['rok'].dropna().unique().astype(int))
@@ -416,11 +474,11 @@ elif menu == "Interaktivní srovnávač":
     
     c1, c2 = st.columns(2)
     with c1:
-        param_c = st.multiselect("Metriky COVID-19:", covid_metrics, key="ms_covid")
+        param_c = st.multiselect("**Metriky COVID-19:**", covid_metrics, key="ms_covid")
     with c2:
-        param_f = st.multiselect("Metriky Chřipka:", flu_metrics, key="ms_flu")
+        param_f = st.multiselect("**Metriky Chřipka:**", flu_metrics, key="ms_flu")
 
-    typ_grafu = st.radio("Typ grafu:", ["Sloupcový (Bar)", "Liniový (Line)", "Výsekový (Pie)"], key="typ_grafu", horizontal=True)
+    typ_grafu = st.radio("**Typ grafu:**", ["Sloupcový (Bar)", "Liniový (Line)", "Výsekový (Pie)"], key="typ_grafu", horizontal=True)
 
     d1 = pd.DataFrame()
     if param_c:
@@ -498,9 +556,135 @@ elif menu == "Interaktivní srovnávač":
         fig_custom.update_layout(template='plotly_white', height=600, xaxis={'type': 'category'})
         st.plotly_chart(fig_custom, use_container_width=True)
         
-        st.markdown("### 📋 Detailní data")
+        st.title("Detailní data")
         pivot_df = df_plot.pivot(index='rok', columns='Metrika', values='Hodnota').fillna(0)
         pivot_df.index = pivot_df.index.astype(str)
         st.dataframe(pivot_df.style.format("{:,.0f}"), use_container_width=True)
     else:
         st.warning("Vyberte prosím parametry.")
+
+elif menu == "Covid-19 (LIVE)":
+    st.title("Aktuální situace COVID-19 v ČR")
+    
+    MY_API_TOKEN = "7c12f49908c4e976ae3a9e3336d2ad51" 
+
+    @st.cache_data(ttl=3600)
+    def fetch_api_platform_data(token):
+        headers = {"Accept": "application/ld+json"}
+        base_path = "https://onemocneni-aktualne.mzcr.cz/api/v3"
+        
+        import datetime
+        dnes = datetime.date.today()
+        datum_od = (dnes - datetime.timedelta(days=40)).strftime('%Y-%m-%d')
+
+        params_hist = {
+            "apiToken": token,
+            "items_per_page": 100, 
+            "datum[after]": datum_od
+        }
+
+        try:
+            # 1. ZÁKLADNÍ PŘEHLED
+            r_base = requests.get(f"{base_path}/zakladni-prehled", params={"apiToken": token}, headers=headers)
+            current = r_base.json()['hydra:member'][0]
+                            
+            # 2. NAKAŽENÍ A REINFEKCE (pro graf nakažených)
+            r_cases = requests.get(f"{base_path}/nakazeni-reinfekce", params=params_hist, headers=headers)
+            df_cases = pd.DataFrame(r_cases.json().get('hydra:member', []))
+            
+            # 3. HOSPITALIZACE A ÚMRTÍ (pro graf hospitalizací a úmrtí)
+            r_hosp = requests.get(f"{base_path}/hospitalizace", params=params_hist, headers=headers)
+            df_hosp = pd.DataFrame(r_hosp.json().get('hydra:member', []))
+            
+            # 4. TESTY A ÚMRTÍ (komplexní přehled)
+            r_tests = requests.get(f"{base_path}/nakazeni-vyleceni-umrti-testy", params=params_hist, headers=headers)
+            df_tests = pd.DataFrame(r_tests.json().get('hydra:member', []))
+            
+            # Formátování všech DataFrame
+            for df in [df_cases, df_hosp, df_tests]:
+                if not df.empty:
+                    df['datum'] = pd.to_datetime(df['datum'])
+                    df.sort_values('datum', ascending=True, inplace=True)
+                    df.reset_index(drop=True, inplace=True)
+
+            return current, df_cases, df_hosp, df_tests
+
+        except Exception as e:
+            st.error(f"Chyba při volání API: {e}")
+            return None, None, None, None
+
+    # --- Volání dat ---
+    current, df_cases, df_hosp, df_tests = fetch_api_platform_data(MY_API_TOKEN)
+
+    if current is not None:
+        # --- SEKCE 1: KARTY (ROZŠÍŘENO) ---
+        st.header("Aktuální stav pandemie v ČR")
+            
+        def fmt(val):
+                try:
+                    return f"{int(val):,}".replace(",", " ")
+                except:
+                    return "0"
+
+            # PRVNÍ ŘADA: Hlavní epidemiologická data
+        row1_1, row1_2, row1_3 = st.columns(3)
+        with row1_1:
+            st.metric("Celkem potvrzené případy", fmt(current.get('potvrzene_pripady_celkem')), 
+                    delta=f"+{fmt(current.get('potvrzene_pripady_vcerejsi_den'))} včera")
+        with row1_2:
+            st.metric("Aktivní případy", fmt(current.get('aktivni_pripady')))
+        with row1_3:
+            st.metric("Celkem úmrtí", fmt(current.get('umrti')))
+
+        # DRUHÁ ŘADA: Nemocnice a ohrožené skupiny
+        row2_1, row2_2, row2_3 = st.columns(3)
+        with row2_1:
+            st.metric("Aktuálně hospitalizovaní", fmt(current.get('aktualne_hospitalizovani')))
+        with row2_2:
+            st.metric("Případy 65+ celkem", fmt(current.get('potvrzene_pripady_65_celkem')),
+                    delta=f"+{fmt(current.get('potvrzene_pripady_65_vcerejsi_den'))} včera")
+        with row2_3:
+            st.metric("Celkem reinfekce", fmt(current.get('reinfekce_celkem')),
+                    delta=f"+{fmt(current.get('reinfekce_vcerejsi_den'))} včera")
+
+        # TŘETÍ ŘADA: Testy a očkování
+        row3_1, row3_2, row3_3 = st.columns(3)
+        with row3_1:
+            st.metric("PCR & AG testy celkem", fmt(current.get('provedene_testy_celkem')),
+                    delta=f"+{fmt(current.get('provedene_testy_vcerejsi_den'))} včera")
+        with row3_2:
+            # Celkový počet plně očkovaných osob
+            st.metric("Očkované osoby celkem", fmt(current.get('ockovane_osoby_celkem')),
+                    delta=f"+{fmt(current.get('ockovane_osoby_vcerejsi_den'))} včera")
+        with row3_3:
+            # Počet vykázaných dávek (může být víc než osob)
+            st.metric("Vykázaná očkování (dávky)", fmt(current.get('vykazana_ockovani_celkem')))
+
+
+        st.markdown("---")
+        st.header("Vývoj za posledních 30 dní")
+        
+
+        # --- SEKCE 2: PRVNÍ ŘADA GRAFŮ ---
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Hospitalizace")
+            st.line_chart(df_hosp.set_index('datum')['pocet_hosp'], color="#FF4B4B")
+        with col2:
+            st.subheader("Noví nakažení")
+            st.bar_chart(df_cases.set_index('datum')['nove_pripady'], color="#FFAA00")
+
+        # --- SEKCE 3: DRUHÁ ŘADA GRAFŮ (NOVÉ) ---
+        col3, col4 = st.columns(2)
+        with col3:
+            st.subheader("Denní úmrtí")
+            # Používáme sloupec 'umrti' z endpointu hospitalizace (denní počet)
+            st.bar_chart(df_hosp.set_index('datum')['umrti'], color="#333333")
+        with col4:
+            st.subheader("Provedené testy")
+            # Používáme 'prirustkovy_pocet_provedenych_testu' z nového endpointu
+            st.area_chart(df_tests.set_index('datum')['prirustkovy_pocet_provedenych_testu'], color="#29B6F6")
+
+        # Info o aktuálnosti
+        posledni_datum = df_cases['datum'].max().strftime('%d. %m. %Y')
+        st.info(f"Všechna data jsou aktuální k: {posledni_datum}")
